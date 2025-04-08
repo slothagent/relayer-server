@@ -1,13 +1,21 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { slothFactoryContract, RELAYER_ADDRESS, wallet, NATIVE_TOKEN } from './src/config';
+import { slothFactoryContract, RELAYER_ADDRESS, wallet } from './src/config.js';
 import type { Context } from 'hono';
 import { ethers } from 'ethers';
-import { SlothABI } from './src/abis/abis';
+import { SlothABI } from './src/abis/abis.js';
 
 const app = new Hono();
 
-app.use('/*', cors());
+// Configure CORS with specific origins
+app.use('/*', cors({
+  origin: ['https://www.slothai.xyz', 'http://localhost:5173', 'https://api.slothai.xyz','https://slothai.xyz'],
+  allowMethods: ['POST', 'GET', 'OPTIONS'],
+  allowHeaders: ['Content-Type', 'Authorization'],
+  exposeHeaders: ['Content-Length'],
+  maxAge: 3600,
+  credentials: true
+}));
 
 // Define interfaces
 interface CreateTokenRequest {

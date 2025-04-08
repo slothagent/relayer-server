@@ -228,7 +228,7 @@ async function createTokenWithPermitRelayer(
         console.log('Request body:', JSON.stringify(requestBody, null, 2));
 
         // Send request to relayer
-        const response = await fetch('http://localhost:4040/relay', {
+        const response = await fetch('https://relayer.slothai.xyz/relay', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',

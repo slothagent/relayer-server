@@ -268,7 +268,7 @@ async function buyTokenWithPermitRelayer(
         console.log('Request body:', JSON.stringify(requestBody, null, 2));
 
         // Send request to relayer
-        const response = await fetch('http://localhost:4040/relay', {
+        const response = await fetch('https://relayer.slothai.xyz/relay', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -312,7 +312,7 @@ async function main() {
             nativeAmount: ethers.parseEther("1") // Buying with 1 native token
         };
 
-        const SLOTH_ADDRESS = "0x77D450C60c4746B16513b2aFb334Be77786ed27a"; // Example Sloth contract address
+        const SLOTH_ADDRESS = "0xE15A4b0D8a60aA2610f2bbC3550A5c4070f0aB2f"; // Example Sloth contract address
 
         console.log("Buying token with parameters:", convertBigIntToString(buyParams));
         const result = await buyTokenWithPermitRelayer(signer, SLOTH_ADDRESS, buyParams);
