@@ -1,0 +1,6 @@
+EIP 721 - Ancient8
+SlothFactory deployed to: 0xe520B9F320Ed91Cf590CF9884d2b051f2ece4C4E
+
+Sonic
+SlothFactory deployed to: 0x90e2D46B953C96fA574fdFa15E9151A8a87e7A61
+Sloth Implementation deployed to: 0x0fb294BB46829a2C3fc460cdbfa09381d1417494
