@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { slothFactoryContract, RELAYER_ADDRESS, wallet } from './src/config.js';
 import type { Context } from 'hono';
-import { ethers } from 'ethers';
+import { ethers, parseEther } from 'ethers';
 import { SlothABI } from './src/abis/abis.js';
 
 const app = new Hono();
@@ -26,6 +26,13 @@ interface CreateTokenRequest {
         symbol: string;
         tokenId: string;
         initialDeposit: string;
+        twitter: string;
+        telegram: string;
+        website: string;
+        categories: string[];
+        image: string;
+        network: string;
+        description: string;
     };
     deadline: string;
     nonce: string;
@@ -68,26 +75,6 @@ interface SellRequest {
 
 type RelayRequest = CreateTokenRequest | BuyRequest | SellRequest;
 
-// Helper function to convert BigInt values to strings
-function convertBigIntToString(obj: any): any {
-    if (typeof obj === 'bigint') {
-        return obj.toString();
-    }
-    if (obj === null || obj === undefined) {
-        return obj;
-    }
-    if (typeof obj === 'object') {
-        if (Array.isArray(obj)) {
-            return obj.map(convertBigIntToString);
-        }
-        const result: any = {};
-        for (const key in obj) {
-            result[key] = convertBigIntToString(obj[key]);
-        }
-        return result;
-    }
-    return obj;
-}
 
 app.post('/relay', async (c: Context) => {
     try {
@@ -107,12 +94,16 @@ app.post('/relay', async (c: Context) => {
 
                 console.log("Verification params:", {
                     creator: request.creator,
-                    params: {
-                        name: request.params.name,
-                        symbol: request.params.symbol,
-                        tokenId: paramsStruct.tokenId.toString(),
-                        initialDeposit: paramsStruct.initialDeposit.toString()
+                    params: paramsStruct,
+                    social: {
+                        twitter: request.params.twitter,
+                        telegram: request.params.telegram,
+                        website: request.params.website
                     },
+                    categories: request.params.categories,
+                    description: request.params.description,
+                    image: request.params.image,
+                    network: request.params.network,
                     deadline: request.deadline,
                     nonce: request.nonce,
                     signature: request.signature,
@@ -200,7 +191,7 @@ app.post('/relay', async (c: Context) => {
                     throw new Error("Invalid event arguments - expected at least 10 arguments");
                 }
 
-                const result = {
+                const result: any = {
                     success: true,
                     txHash: tx.hash,
                     token: parsedEvent.args[0],
@@ -215,6 +206,95 @@ app.post('/relay', async (c: Context) => {
                     factory: parsedEvent.args[9],
                     blockNumber: receipt.blockNumber
                 };
+
+                const payload = {
+                    name: paramsStruct.name,
+                    address: result.token,
+                    owner: request.creator,
+                    description: request.params.description,
+                    ticker: request.params.symbol,
+                    imageUrl: request.params.image,
+                    totalSupply: parseEther("1000000000").toString(),
+                    twitterUrl: request.params.twitter,
+                    telegramUrl: request.params.telegram,
+                    websiteUrl: request.params.website,
+                    network: request.params.network,
+                    categories: request.params.categories,
+                };
+    
+                // console.log('Sending payload:', payload); // Debug log
+    
+                const response = await fetch(`${process.env.API_URL}/api/token`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(payload),
+                });
+
+                if (!response.ok) {
+                    console.error('Failed to create token');
+                    return;
+                }
+
+                // Check if initialDeposit is greater than 0 and look for TokenBought event
+                if (BigInt(request.params.initialDeposit) > BigInt(0)) {
+                    const tokenBoughtEvent = receipt.logs.find(
+                        (log: ethers.Log) => {
+                            try {
+                                return log.topics[0] === ethers.id("TokenBought(address,address,uint256,uint256)");
+                            } catch (e) {
+                                console.error("Error checking TokenBought log topic:", e);
+                                return false;
+                            }
+                        }
+                    );
+
+                    if (tokenBoughtEvent) {
+                        const slothContract = new ethers.Contract(
+                            result.sloth,
+                            SlothABI,
+                            wallet
+                        );
+
+                        try {
+                            const parsedTokenBoughtEvent = slothContract.interface.parseLog({
+                                topics: tokenBoughtEvent.topics,
+                                data: tokenBoughtEvent.data
+                            });
+
+                            const tokenPrice = await slothContract.getTokenPrice();
+                            console.log("Token price:", tokenPrice);
+                            if (parsedTokenBoughtEvent && parsedTokenBoughtEvent.args) {
+                                const tokenBought = {
+                                    buyer: parsedTokenBoughtEvent.args[0],
+                                    recipient: parsedTokenBoughtEvent.args[1],
+                                    nativeAmount: parsedTokenBoughtEvent.args[2].toString(),
+                                    tokenAmount: parsedTokenBoughtEvent.args[3].toString()
+                                };
+                                console.log("Token bought:", tokenBought);
+                                await fetch(`${process.env.API_URL}/api/transaction`, {
+                                    method: 'POST',
+                                    headers: {
+                                        'Content-Type': 'application/json',
+                                    },
+                                    body: JSON.stringify({
+                                        network: request.params.network,
+                                        userAddress: tokenBought.buyer,
+                                        tokenAddress: result.token,
+                                        amountToken: Number(tokenBought.tokenAmount)/10**18,
+                                        amount: Number(request.params.initialDeposit)/10**18,
+                                        price: (Number(tokenPrice) / 10**18),
+                                        transactionType: 'BUY',
+                                        transactionHash: tx.hash
+                                    }),
+                                });
+                            }
+                        } catch (e) {
+                            console.error("Error parsing TokenBought event:", e);
+                        }
+                    }
+                }
 
                 console.log("Token created successfully:", result);
                 return c.json(result);
@@ -282,6 +362,7 @@ app.post('/relay', async (c: Context) => {
                 const buyReceipt = await buyTx.wait();
                 console.log('Buy transaction confirmed');
 
+                
                 return c.json({
                     success: true,
                     txHash: buyTx.hash
@@ -345,7 +426,7 @@ app.post('/relay', async (c: Context) => {
                 );
 
                 console.log('Sell transaction sent:', sellTx.hash);
-                const sellReceipt = await sellTx.wait();
+                const sellbuyReceipt = await sellTx.wait();
                 console.log('Sell transaction confirmed');
 
                 return c.json({
