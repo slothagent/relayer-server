@@ -51,6 +51,7 @@ interface BuyRequest {
     nativeAmount: string;
     nonce: string;
     deadline: string;
+    network: string;
     signature: {
         v: number;
         r: string;
@@ -66,6 +67,7 @@ interface SellRequest {
     tokenAmount: string;
     nonce: string;
     deadline: string;
+    network: string;
     signature: {
         v: number;
         r: string;
@@ -282,7 +284,7 @@ app.post('/relay', async (c: Context) => {
                                     body: JSON.stringify({
                                         network: request.params.network,
                                         userAddress: tokenBought.buyer,
-                                        tokenAddress: result.token,
+                                        tokenAddress: result.sloth,
                                         amountToken: Number(tokenBought.tokenAmount)/10**18,
                                         amount: Number(request.params.initialDeposit)/10**18,
                                         price: (Number(tokenPrice) / 10**18),
@@ -311,7 +313,7 @@ app.post('/relay', async (c: Context) => {
                     wallet
                 );
 
-                console.log("relayer address:", wallet.address );
+                // console.log("relayer address:", wallet.address );
 
                 // Log parameters in the exact order they should be hashed
                 console.log('Verifying buy signature with parameters:', {
@@ -362,7 +364,61 @@ app.post('/relay', async (c: Context) => {
                 console.log('Buy transaction sent:', buyTx.hash);
                 const buyReceipt = await buyTx.wait();
                 console.log('Buy transaction confirmed');
+                const tokenBoughtEvent = buyReceipt.logs.find(
+                    (log: ethers.Log) => {
+                        try {
+                            return log.topics[0] === ethers.id("TokenBought(address,address,uint256,uint256)");
+                        } catch (e) {
+                            console.error("Error checking TokenBought log topic:", e);
+                            return false;
+                        }
+                    }
+                );
 
+                if (tokenBoughtEvent) {
+                    const slothContract = new ethers.Contract(
+                        buyRequest.slothContractAddress,
+                        SlothABI,
+                        wallet
+                    );
+
+                    try {
+                        const parsedTokenBoughtEvent = slothContract.interface.parseLog({
+                            topics: tokenBoughtEvent.topics,
+                            data: tokenBoughtEvent.data
+                        });
+
+                        const tokenPrice = await slothContract.getTokenPrice();
+                        console.log("Token price:", tokenPrice);
+                        if (parsedTokenBoughtEvent && parsedTokenBoughtEvent.args) {
+                            const tokenBought = {
+                                buyer: parsedTokenBoughtEvent.args[0],
+                                recipient: parsedTokenBoughtEvent.args[1],
+                                nativeAmount: parsedTokenBoughtEvent.args[2].toString(),
+                                tokenAmount: parsedTokenBoughtEvent.args[3].toString()
+                            };
+                            console.log("Token bought:", tokenBought);
+                            await fetch(`${process.env.API_URL}/api/transaction`, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                },
+                                body: JSON.stringify({
+                                    network: buyRequest.network,
+                                    userAddress: tokenBought.buyer,
+                                    tokenAddress: buyRequest.slothContractAddress,
+                                    amountToken: Number(tokenBought.tokenAmount)/10**18,
+                                    amount: Number(buyRequest.nativeAmount)/10**18,
+                                    price: (Number(tokenPrice) / 10**18),
+                                    transactionType: 'BUY',
+                                    transactionHash: buyTx.hash
+                                }),
+                            });
+                        }
+                    } catch (e) {
+                        console.error("Error parsing TokenBought event:", e);
+                    }
+                }
                 
                 return c.json({
                     success: true,
@@ -429,7 +485,67 @@ app.post('/relay', async (c: Context) => {
                 console.log('Sell transaction sent:', sellTx.hash);
                 const sellbuyReceipt = await sellTx.wait();
                 console.log('Sell transaction confirmed');
+                const tokenSoldEvent = sellbuyReceipt.logs.find(
+                    (log: ethers.Log) => {
+                        try {
+                            return log.topics[0] === ethers.id("TokenSold(address,address,uint256,uint256)");
+                        } catch (e) {
+                            console.error("Error checking TokenSold log topic:", e);
+                            return false;
+                        }
+                    }
+                );
 
+                if (tokenSoldEvent) {
+                    const slothContract = new ethers.Contract(
+                        sellRequest.slothContractAddress,
+                        SlothABI,
+                        wallet
+                    );
+
+                    try {
+                        const parsedTokenSoldEvent = slothContract.interface.parseLog({
+                            topics: tokenSoldEvent.topics,
+                            data: tokenSoldEvent.data
+                        });
+
+                        const tokenPrice = await slothContract.getTokenPrice();
+                        console.log("Token price:", tokenPrice);
+                        if (parsedTokenSoldEvent && parsedTokenSoldEvent.args) {
+                            const tokenSold = {
+                                seller: parsedTokenSoldEvent.args[0],
+                                recipient: parsedTokenSoldEvent.args[1],
+                                tokenAmount: parsedTokenSoldEvent.args[2].toString(),
+                                nativeAmount: parsedTokenSoldEvent.args[3].toString()
+                            };
+                            console.log("Token sold:", tokenSold);
+                            await fetch(`${process.env.API_URL}/api/transaction`, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                },
+                                body: JSON.stringify({
+                                    network: sellRequest.network,
+                                    userAddress: tokenSold.seller,
+                                    tokenAddress: sellRequest.slothContractAddress,
+                                    amountToken: Number(tokenSold.tokenAmount)/10**18,
+                                    amount: Number(tokenSold.nativeAmount)/10**18,
+                                    price: (Number(tokenPrice) / 10**18),
+                                    transactionType: 'SELL',
+                                    transactionHash: sellTx.hash
+                                }),
+                            });
+                        }
+                    } catch (e) {
+                        console.error("Error parsing TokenSold event:", e);
+                    }
+                }
+                // event TokenSold(
+                //     address indexed seller,
+                //     address indexed recipient,
+                //     uint256 tokenAmount,
+                //     uint256 nativeAmount
+                // );
                 return c.json({
                     success: true,
                     txHash: sellTx.hash
