@@ -210,6 +210,7 @@ app.post('/relay', async (c: Context) => {
                 const payload = {
                     name: paramsStruct.name,
                     address: result.token,
+                    pairAddress: result.sloth,
                     owner: request.creator,
                     description: request.params.description,
                     ticker: request.params.symbol,
