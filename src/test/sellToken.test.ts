@@ -288,14 +288,28 @@ async function main() {
             throw new Error("PRIVATE_KEY not found in environment variables");
         }
         const signer = new ethers.Wallet(sellerPrivateKey, provider);
-        console.log("Seller address:", await signer.getAddress());
+        const sellerAddress = await signer.getAddress();
+        console.log("Seller address:", sellerAddress);
+
+        const SLOTH_ADDRESS = "0x77D450C60c4746B16513b2aFb334Be77786ed27a";
+        
+        // Get token address and contract instance
+        const slothContract = new ethers.Contract(SLOTH_ADDRESS, SlothABI, provider);
+        const tokenAddress = await slothContract.token();
+        const tokenContract = new ethers.Contract(tokenAddress, SlothTokenABI, provider);
+        
+        // Get current token balance
+        const currentBalance = await tokenContract.balanceOf(sellerAddress);
+        console.log("Current token balance:", ethers.formatEther(currentBalance), "tokens");
+        
+        // Calculate 20% of current balance
+        const amountToSell = (currentBalance * BigInt(20)) / BigInt(100);
+        console.log("Amount to sell (20%):", ethers.formatEther(amountToSell), "tokens");
 
         const sellParams = {
-            recipient: await signer.getAddress(), // Receiving native tokens to self
-            tokenAmount: ethers.parseEther("1") // Selling 1 token
+            recipient: sellerAddress, // Receiving native tokens to self
+            tokenAmount: amountToSell
         };
-
-        const SLOTH_ADDRESS = "0x77D450C60c4746B16513b2aFb334Be77786ed27a"; // Example Sloth contract address
 
         console.log("Selling token with parameters:", convertBigIntToString(sellParams));
         const result = await sellTokenWithPermitRelayer(signer, SLOTH_ADDRESS, sellParams);

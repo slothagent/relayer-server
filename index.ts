@@ -528,7 +528,7 @@ app.post('/relay', async (c: Context) => {
                                     network: sellRequest.network,
                                     userAddress: tokenSold.seller,
                                     tokenAddress: sellRequest.slothContractAddress,
-                                    amountToken: Number(tokenSold.tokenAmount)/10**18,
+                                    amountToken: Number(tokenSold.tokenAmount),
                                     amount: Number(tokenSold.nativeAmount)/10**18,
                                     price: (Number(tokenPrice) / 10**18),
                                     transactionType: 'SELL',
