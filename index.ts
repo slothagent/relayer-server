@@ -1,570 +1,573 @@
 import { Hono } from 'hono';
+import { Ed25519Keypair } from '@mysten/sui.js/keypairs/ed25519';
+import { Secp256k1Keypair } from '@mysten/sui.js/keypairs/secp256k1';
+import { SuiClient } from '@mysten/sui.js/client';
+import { bcs } from '@mysten/sui.js/bcs';
+import { TransactionBlock } from '@mysten/sui.js/transactions';
 import { cors } from 'hono/cors';
-import { slothFactoryContract, RELAYER_ADDRESS, wallet } from './src/config.js';
-import type { Context } from 'hono';
-import { ethers, parseEther } from 'ethers';
-import { SlothABI } from './src/abis/abis.js';
+import { db } from './src/db';
+import { accounts } from './src/db/schema';
+import { and, eq } from 'drizzle-orm';
 
 const app = new Hono();
 
-// Configure CORS with specific origins
-app.use('/*', cors({
-  origin: ['https://www.slothai.xyz', 'http://localhost:5173', 'https://api.slothai.xyz','https://slothai.xyz'],
-  allowMethods: ['POST', 'GET', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization'],
-  exposeHeaders: ['Content-Length'],
-  maxAge: 3600,
-  credentials: true
-}));
-
-// Define interfaces
-interface CreateTokenRequest {
-    type: 'create-token';
-    creator: string;
-    params: {
-        name: string;
-        symbol: string;
-        tokenId: string;
-        initialDeposit: string;
-        twitter: string;
-        telegram: string;
-        website: string;
-        categories: string[];
-        image: string;
-        network: string;
-        description: string;
-    };
-    deadline: string;
-    nonce: string;
-    signature: {
-        v: number;
-        r: string;
-        s: string;
-    };
-}
-
-interface BuyRequest {
-    type: 'buy';
-    slothContractAddress: string;
-    buyer: string;
-    recipient: string;
-    nativeAmount: string;
-    nonce: string;
-    deadline: string;
-    network: string;
-    signature: {
-        v: number;
-        r: string;
-        s: string;
-    };
-}
-
-interface SellRequest {
-    type: 'sell';
-    slothContractAddress: string;
-    seller: string;
-    recipient: string;
-    tokenAmount: string;
-    nonce: string;
-    deadline: string;
-    network: string;
-    signature: {
-        v: number;
-        r: string;
-        s: string;
-    };
-}
-
-type RelayRequest = CreateTokenRequest | BuyRequest | SellRequest;
+// Setup CORS for API access
+app.use('/*', cors());
+// Configure Sui client for testnet
 
 
-app.post('/relay', async (c: Context) => {
-    try {
-        const request = await c.req.json<RelayRequest>();
-        console.log('Received request:', JSON.stringify(request, null, 2));
-
-        let tx;
-        switch (request.type) {
-            case 'create-token': {
-                // Create params struct
-                const paramsStruct = {
-                    name: request.params.name,
-                    symbol: request.params.symbol,
-                    tokenId: BigInt(request.params.tokenId),
-                    initialDeposit: BigInt(request.params.initialDeposit)
-                };
-
-                console.log("Verification params:", {
-                    creator: request.creator,
-                    params: paramsStruct,
-                    social: {
-                        twitter: request.params.twitter,
-                        telegram: request.params.telegram,
-                        website: request.params.website
-                    },
-                    categories: request.params.categories,
-                    description: request.params.description,
-                    image: request.params.image,
-                    network: request.params.network,
-                    deadline: request.deadline,
-                    nonce: request.nonce,
-                    signature: request.signature,
-                    relayer: RELAYER_ADDRESS
-                });
-
-                // Verify signature on-chain with struct format
-                const isValid = await slothFactoryContract.verifyCreateSignatureWithRelayer(
-                    request.creator,
-                    paramsStruct,
-                    request.deadline,
-                    request.signature.v,
-                    request.signature.r,
-                    request.signature.s,
-                    RELAYER_ADDRESS,
-                    BigInt(request.nonce)
-                );
-
-                console.log("Signature verification result:", isValid);
-
-                if (!isValid) {
-                    throw new Error('Invalid signature');
-                }
-
-                console.log("Creating token...");
-                tx = await slothFactoryContract.createWithPermitRelayer(
-                    request.creator,
-                    paramsStruct,
-                    request.deadline,
-                    request.signature.v,
-                    request.signature.r,
-                    request.signature.s,
-                    BigInt(request.nonce),
-                    { 
-                        gasLimit: 5000000
-                    }
-                );
-
-                console.log("Transaction sent:", tx.hash);
-
-                const receipt = await tx.wait();
-                console.log("Transaction mined:", receipt.blockNumber);
-                console.log("Transaction logs:", receipt.logs);
-
-                // Get token and sloth addresses from event
-                const createEvent = receipt.logs.find(
-                    (log: ethers.Log) => {
-                        try {
-                            return log.topics[0] === ethers.id("SlothCreated(address,address,address,uint256,uint256,uint256,uint256,uint256,bool,address)");
-                        } catch (e) {
-                            console.error("Error checking log topic:", e);
-                            return false;
-                        }
-                    }
-                );
-
-                if (!createEvent) {
-                    console.error("All transaction logs:", JSON.stringify(receipt.logs, null, 2));
-                    throw new Error("SlothCreated event not found in transaction logs");
-                }
-
-                console.log("Found create event:", createEvent);
-
-                let parsedEvent;
-                try {
-                    parsedEvent = slothFactoryContract.interface.parseLog({
-                        topics: createEvent.topics,
-                        data: createEvent.data
-                    });
-                } catch (e: unknown) {
-                    console.error("Error parsing event:", e);
-                    console.error("Event data:", {
-                        topics: createEvent.topics,
-                        data: createEvent.data
-                    });
-                    throw new Error(`Failed to parse SlothCreated event: ${e instanceof Error ? e.message : String(e)}`);
-                }
-
-                if (!parsedEvent) {
-                    throw new Error("Failed to parse SlothCreated event - parsed event is null");
-                }
-
-                if (!parsedEvent.args || parsedEvent.args.length < 10) {
-                    console.error("Invalid event args:", parsedEvent);
-                    throw new Error("Invalid event arguments - expected at least 10 arguments");
-                }
-
-                const result: any = {
-                    success: true,
-                    txHash: tx.hash,
-                    token: parsedEvent.args[0],
-                    sloth: parsedEvent.args[1],
-                    creator: parsedEvent.args[2],
-                    totalSupply: parsedEvent.args[3].toString(),
-                    saleAmount: parsedEvent.args[4].toString(),
-                    tokenOffset: parsedEvent.args[5].toString(),
-                    nativeOffset: parsedEvent.args[6].toString(),
-                    tokenId: parsedEvent.args[7].toString(),
-                    whitelistEnabled: parsedEvent.args[8],
-                    factory: parsedEvent.args[9],
-                    blockNumber: receipt.blockNumber
-                };
-
-                const payload = {
-                    name: paramsStruct.name,
-                    address: result.token,
-                    pairAddress: result.sloth,
-                    owner: request.creator,
-                    description: request.params.description,
-                    ticker: request.params.symbol,
-                    imageUrl: request.params.image,
-                    totalSupply: parseEther("1000000000").toString(),
-                    twitterUrl: request.params.twitter,
-                    telegramUrl: request.params.telegram,
-                    websiteUrl: request.params.website,
-                    network: request.params.network,
-                    categories: request.params.categories,
-                };
-    
-                // console.log('Sending payload:', payload); // Debug log
-    
-                const response = await fetch(`${process.env.API_URL}/api/token`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify(payload),
-                });
-
-                if (!response.ok) {
-                    console.error('Failed to create token');
-                    return;
-                }
-
-                // Check if initialDeposit is greater than 0 and look for TokenBought event
-                if (BigInt(request.params.initialDeposit) > BigInt(0)) {
-                    const tokenBoughtEvent = receipt.logs.find(
-                        (log: ethers.Log) => {
-                            try {
-                                return log.topics[0] === ethers.id("TokenBought(address,address,uint256,uint256)");
-                            } catch (e) {
-                                console.error("Error checking TokenBought log topic:", e);
-                                return false;
-                            }
-                        }
-                    );
-
-                    if (tokenBoughtEvent) {
-                        const slothContract = new ethers.Contract(
-                            result.sloth,
-                            SlothABI,
-                            wallet
-                        );
-
-                        try {
-                            const parsedTokenBoughtEvent = slothContract.interface.parseLog({
-                                topics: tokenBoughtEvent.topics,
-                                data: tokenBoughtEvent.data
-                            });
-
-                            const tokenPrice = await slothContract.getTokenPrice();
-                            console.log("Token price:", tokenPrice);
-                            if (parsedTokenBoughtEvent && parsedTokenBoughtEvent.args) {
-                                const tokenBought = {
-                                    buyer: parsedTokenBoughtEvent.args[0],
-                                    recipient: parsedTokenBoughtEvent.args[1],
-                                    nativeAmount: parsedTokenBoughtEvent.args[2].toString(),
-                                    tokenAmount: parsedTokenBoughtEvent.args[3].toString()
-                                };
-                                console.log("Token bought:", tokenBought);
-                                await fetch(`${process.env.API_URL}/api/transaction`, {
-                                    method: 'POST',
-                                    headers: {
-                                        'Content-Type': 'application/json',
-                                    },
-                                    body: JSON.stringify({
-                                        network: request.params.network,
-                                        userAddress: tokenBought.buyer,
-                                        tokenAddress: result.sloth,
-                                        amountToken: Number(tokenBought.tokenAmount)/10**18,
-                                        amount: Number(request.params.initialDeposit)/10**18,
-                                        price: (Number(tokenPrice) / 10**18),
-                                        transactionType: 'BUY',
-                                        transactionHash: tx.hash
-                                    }),
-                                });
-                            }
-                        } catch (e) {
-                            console.error("Error parsing TokenBought event:", e);
-                        }
-                    }
-                }
-
-                console.log("Token created successfully:", result);
-                return c.json(result);
-            }
-
-            case 'buy': {
-                const buyRequest = request as BuyRequest;
-                console.log('Processing buy request:', buyRequest);
-
-                const slothContract = new ethers.Contract(
-                    buyRequest.slothContractAddress,
-                    SlothABI,
-                    wallet
-                );
-
-                // console.log("relayer address:", wallet.address );
-
-                // Log parameters in the exact order they should be hashed
-                console.log('Verifying buy signature with parameters:', {
-                    buyer: buyRequest.buyer,
-                    recipient: buyRequest.recipient,
-                    nativeAmount: BigInt(buyRequest.nativeAmount),
-                    nonce: BigInt(buyRequest.nonce),
-                    deadline: BigInt(buyRequest.deadline),
-                    relayer: RELAYER_ADDRESS,
-                    verifyingContract: buyRequest.slothContractAddress
-                });
-
-                // Verify signature with parameters in the exact order from the contract
-                const signature = await slothContract.verifyBuySignatureWithRelayer(
-                    buyRequest.buyer,
-                    buyRequest.recipient,
-                    BigInt(buyRequest.nativeAmount),
-                    BigInt(buyRequest.nonce),
-                    BigInt(buyRequest.deadline),
-                    RELAYER_ADDRESS,
-                    buyRequest.signature.v,
-                    buyRequest.signature.r,
-                    buyRequest.signature.s
-                );
-                console.log("isValidBuySignature:", signature);
-
-                if (!signature) {
-                    console.error('Invalid buy signature');
-                    return c.json({ error: 'Invalid buy signature' }, 400);
-                }
-
-                console.log('Buy signature verified successfully');
-
-                // Execute buy transaction with parameters in the same order
-                const buyTx = await slothContract.buyWithPermitRelayer(
-                    buyRequest.buyer,
-                    buyRequest.recipient,
-                    BigInt(buyRequest.nativeAmount),
-                    BigInt(buyRequest.nonce),
-                    BigInt(buyRequest.deadline),
-                    RELAYER_ADDRESS,
-                    buyRequest.signature.v,
-                    buyRequest.signature.r,
-                    buyRequest.signature.s,
-                    { gasLimit: 5000000 }
-                );
-
-                console.log('Buy transaction sent:', buyTx.hash);
-                const buyReceipt = await buyTx.wait();
-                console.log('Buy transaction confirmed');
-                const tokenBoughtEvent = buyReceipt.logs.find(
-                    (log: ethers.Log) => {
-                        try {
-                            return log.topics[0] === ethers.id("TokenBought(address,address,uint256,uint256)");
-                        } catch (e) {
-                            console.error("Error checking TokenBought log topic:", e);
-                            return false;
-                        }
-                    }
-                );
-
-                if (tokenBoughtEvent) {
-                    const slothContract = new ethers.Contract(
-                        buyRequest.slothContractAddress,
-                        SlothABI,
-                        wallet
-                    );
-
-                    try {
-                        const parsedTokenBoughtEvent = slothContract.interface.parseLog({
-                            topics: tokenBoughtEvent.topics,
-                            data: tokenBoughtEvent.data
-                        });
-
-                        const tokenPrice = await slothContract.getTokenPrice();
-                        console.log("Token price:", tokenPrice);
-                        if (parsedTokenBoughtEvent && parsedTokenBoughtEvent.args) {
-                            const tokenBought = {
-                                buyer: parsedTokenBoughtEvent.args[0],
-                                recipient: parsedTokenBoughtEvent.args[1],
-                                nativeAmount: parsedTokenBoughtEvent.args[2].toString(),
-                                tokenAmount: parsedTokenBoughtEvent.args[3].toString()
-                            };
-                            console.log("Token bought:", tokenBought);
-                            await fetch(`${process.env.API_URL}/api/transaction`, {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                },
-                                body: JSON.stringify({
-                                    network: buyRequest.network,
-                                    userAddress: tokenBought.buyer,
-                                    tokenAddress: buyRequest.slothContractAddress,
-                                    amountToken: Number(tokenBought.tokenAmount)/10**18,
-                                    amount: Number(buyRequest.nativeAmount)/10**18,
-                                    price: (Number(tokenPrice) / 10**18),
-                                    transactionType: 'BUY',
-                                    transactionHash: buyTx.hash
-                                }),
-                            });
-                        }
-                    } catch (e) {
-                        console.error("Error parsing TokenBought event:", e);
-                    }
-                }
-                
-                return c.json({
-                    success: true,
-                    txHash: buyTx.hash
-                });
-            }
-
-            case 'sell': {
-                const sellRequest = request as SellRequest;
-                console.log('Processing sell request:', sellRequest);
-
-                const slothContract = new ethers.Contract(
-                    sellRequest.slothContractAddress,
-                    SlothABI,
-                    wallet
-                );
-
-                // Log parameters in the exact order they should be hashed
-                console.log('Verifying sell signature with parameters:', {
-                    seller: sellRequest.seller,
-                    recipient: sellRequest.recipient,
-                    tokenAmount: BigInt(sellRequest.tokenAmount),
-                    nonce: BigInt(sellRequest.nonce),
-                    deadline: BigInt(sellRequest.deadline),
-                    relayer: RELAYER_ADDRESS,
-                    verifyingContract: sellRequest.slothContractAddress
-                });
-
-                // Verify signature with parameters in the exact order from the contract
-                const signature = await slothContract.verifySellSignatureWithRelayer(
-                    sellRequest.seller,
-                    sellRequest.recipient,
-                    BigInt(sellRequest.tokenAmount),
-                    BigInt(sellRequest.nonce),
-                    BigInt(sellRequest.deadline),
-                    RELAYER_ADDRESS,
-                    sellRequest.signature.v,
-                    sellRequest.signature.r,
-                    sellRequest.signature.s
-                );
-                console.log("isValidSellSignature:", signature);
-
-                if (!signature) {
-                    console.error('Invalid sell signature');
-                    return c.json({ error: 'Invalid sell signature' }, 400);
-                }
-
-                console.log('Sell signature verified successfully');
-
-                // Execute sell transaction with parameters in the same order
-                const sellTx = await slothContract.sellWithPermitRelayer(
-                    sellRequest.seller,
-                    sellRequest.recipient,
-                    BigInt(sellRequest.tokenAmount),
-                    BigInt(sellRequest.nonce),
-                    BigInt(sellRequest.deadline),
-                    RELAYER_ADDRESS,
-                    sellRequest.signature.v,
-                    sellRequest.signature.r,
-                    sellRequest.signature.s,
-                    { gasLimit: 5000000 }
-                );
-
-                console.log('Sell transaction sent:', sellTx.hash);
-                const sellbuyReceipt = await sellTx.wait();
-                console.log('Sell transaction confirmed');
-                const tokenSoldEvent = sellbuyReceipt.logs.find(
-                    (log: ethers.Log) => {
-                        try {
-                            return log.topics[0] === ethers.id("TokenSold(address,address,uint256,uint256)");
-                        } catch (e) {
-                            console.error("Error checking TokenSold log topic:", e);
-                            return false;
-                        }
-                    }
-                );
-
-                if (tokenSoldEvent) {
-                    const slothContract = new ethers.Contract(
-                        sellRequest.slothContractAddress,
-                        SlothABI,
-                        wallet
-                    );
-
-                    try {
-                        const parsedTokenSoldEvent = slothContract.interface.parseLog({
-                            topics: tokenSoldEvent.topics,
-                            data: tokenSoldEvent.data
-                        });
-
-                        const tokenPrice = await slothContract.getTokenPrice();
-                        console.log("Token price:", tokenPrice);
-                        if (parsedTokenSoldEvent && parsedTokenSoldEvent.args) {
-                            const tokenSold = {
-                                seller: parsedTokenSoldEvent.args[0],
-                                recipient: parsedTokenSoldEvent.args[1],
-                                tokenAmount: parsedTokenSoldEvent.args[2].toString(),
-                                nativeAmount: parsedTokenSoldEvent.args[3].toString()
-                            };
-                            console.log("Token sold:", tokenSold);
-                            await fetch(`${process.env.API_URL}/api/transaction`, {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                },
-                                body: JSON.stringify({
-                                    network: sellRequest.network,
-                                    userAddress: tokenSold.seller,
-                                    tokenAddress: sellRequest.slothContractAddress,
-                                    amountToken: Number(tokenSold.tokenAmount),
-                                    amount: Number(tokenSold.nativeAmount)/10**18,
-                                    price: (Number(tokenPrice) / 10**18),
-                                    transactionType: 'SELL',
-                                    transactionHash: sellTx.hash
-                                }),
-                            });
-                        }
-                    } catch (e) {
-                        console.error("Error parsing TokenSold event:", e);
-                    }
-                }
-                // event TokenSold(
-                //     address indexed seller,
-                //     address indexed recipient,
-                //     uint256 tokenAmount,
-                //     uint256 nativeAmount
-                // );
-                return c.json({
-                    success: true,
-                    txHash: sellTx.hash
-                });
-            }
-
-            default:
-                throw new Error('Invalid request type');
-        }
-    } catch (error) {
-        console.error('Error processing request:', error);
-        return c.json({ success: false, error: error instanceof Error ? error.message : String(error) }, 400);
-    }
+// API Routes
+app.get('/', (c) => {
+  return c.json({ status: 'success', message: 'Sui Relayer API is running' });
 });
 
-const port = 4040;
+// Create a new Sui account
+app.post('/api/sui/account', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { scheme = 'ed25519', mnemonic, user_id, network } = body;
+    
+    // Validate required parameters
+    if (!user_id) {
+      return c.json({
+        status: 'error',
+        message: 'Missing user_id parameter'
+      }, 400);
+    }
+
+    if (!network) {
+      return c.json({
+        status: 'error',
+        message: 'Missing network parameter'
+      }, 400);
+    }
+
+    // Validate network value
+    if (!['mainnet', 'testnet'].includes(network)) {
+      return c.json({
+        status: 'error',
+        message: 'Invalid network parameter. Must be either "mainnet" or "testnet"'
+      }, 400);
+    }
+    
+    let keypair;
+    
+    if (mnemonic) {
+      // If mnemonic is provided, derive keypair from it
+      if (scheme.toLowerCase() === 'ed25519') {
+        keypair = Ed25519Keypair.deriveKeypair(mnemonic);
+      } else if (scheme.toLowerCase() === 'secp256k1') {
+        keypair = Secp256k1Keypair.deriveKeypair(mnemonic);
+      } else {
+        return c.json({ 
+          status: 'error', 
+          message: 'Unsupported scheme. Supported schemes: ed25519, secp256k1' 
+        }, 400);
+      }
+    } else {
+      // Generate a new random keypair
+      if (scheme.toLowerCase() === 'ed25519') {
+        keypair = Ed25519Keypair.generate();
+      } else if (scheme.toLowerCase() === 'secp256k1') {
+        keypair = Secp256k1Keypair.generate();
+      } else {
+        return c.json({ 
+          status: 'error', 
+          message: 'Unsupported scheme. Supported schemes: ed25519, secp256k1' 
+        }, 400);
+      }
+    }
+    
+    const address = keypair.getPublicKey().toSuiAddress();
+    const publicKey = keypair.getPublicKey().toBase64();
+    const privateKey = keypair.getSecretKey().toString();
+
+    // Save to database
+    try {
+      await db.insert(accounts).values({
+        address,
+        publicKey,
+        privateKey,
+        scheme,
+        user_id,
+        network
+      });
+    } catch (dbError: any) {
+      // If duplicate, ignore, else throw
+      if (dbError.code !== '23505') { // 23505 is unique_violation in Postgres
+        throw dbError;
+      }
+    }
+    
+    // For security reasons, we're only returning the privateKey when a new keypair is generated
+    // If derived from mnemonic, client should already have access to the private key material
+    const response: any = {
+      status: 'success',
+      data: {
+        address,
+        publicKey,
+        scheme,
+        network
+      }
+    };
+    
+    // Only include private key material for newly generated accounts, not derived ones
+    if (!mnemonic) {
+      // Export keypair - note this should be handled securely in production
+      response.data.exportedKeypair = keypair.export();
+    }
+    
+    return c.json(response);
+  } catch (error: any) {
+    console.error('Error creating Sui account:', error);
+    return c.json({ 
+      status: 'error', 
+      message: 'Failed to create Sui account',
+      error: error.message
+    }, 500);
+  }
+});
+
+
+
+// Get account(s) by user_id and optional privatekey
+app.get('/api/sui/account/by-user', async (c) => {
+  try {
+    const user_id = c.req.query('user_id');
+    const privatekey = c.req.query('privatekey');
+    const network = c.req.query('network')
+
+    if (!user_id) {
+      return c.json({
+        status: 'error',
+        message: 'Missing user_id parameter'
+      }, 400);
+    }
+
+    // Build base query with user_id
+    let conditions = [eq(accounts.user_id, user_id)];
+
+    // Add network condition if provided
+    if (network) {
+      conditions.push(eq(accounts.network, network));
+    }
+
+    // Add privatekey condition if provided
+    if (privatekey) {
+      conditions.push(eq(accounts.privateKey, privatekey));
+    }
+
+    // Execute query with all conditions
+    const result = await db.select()
+      .from(accounts)
+      .where(and(...conditions));
+
+    return c.json({
+      status: 'success',
+      data: result
+    });
+  } catch (error: any) {
+    console.error('Error fetching account by user_id:', error);
+    return c.json({
+      status: 'error',
+      message: 'Failed to fetch account',
+      error: error.message
+    }, 500);
+  }
+});
+
+// Get account details
+app.get('/api/sui/account/:address', async (c) => {
+  try {
+    const address = c.req.param('address');
+    const network = c.req.query('network')
+    // Validate address format
+    if (!address) {
+      return c.json({
+        status: 'error',
+        message: 'Invalid Sui address format'
+      }, 400);
+    }
+    const suiClient = new SuiClient({
+      url: network == "mainnet" ? 'https://fullnode.mainnet.sui.io:443' :  "https://fullnode.testnet.sui.io:443",
+    });
+
+    const balance = await suiClient.getBalance({owner: address})
+    // Get all token balances
+    const allBalances = await suiClient.getAllBalances({ owner: address });
+    // Enrich with metadata (symbol, decimals)
+    const tokens = await Promise.all(
+      allBalances.map(async (bal) => {
+        const meta = await suiClient.getCoinMetadata({ coinType: bal.coinType });
+        return {
+          coinType: bal.coinType,
+          balance: bal.totalBalance,
+          symbol: meta?.symbol || null,
+          decimals: meta?.decimals || null,
+        };
+      })
+    );
+
+    // Get all owned objects (NFTs/assets)
+    const nfts = await suiClient.getOwnedObjects({
+      owner: address,
+      options: { showType: true, showContent: true },
+    });
+    // You can add more logic to filter/format NFT data as needed
+
+    return c.json({
+      status: 'success',
+      data: {
+        balance,
+        address,
+        tokens,
+        nfts: nfts.data,
+      }
+    });
+  } catch (error: any) {
+    console.error('Error fetching Sui account:', error);
+    return c.json({ 
+      status: 'error', 
+      message: 'Failed to fetch Sui account',
+      error: error.message 
+    }, 500);
+  }
+});
+
+// Delete account by user_id and network
+app.delete('/api/sui/account', async (c) => {
+  try {
+    const user_id = c.req.query('user_id');
+    const network = c.req.query('network');
+    const address = c.req.query('address');
+
+    // Validate required parameters
+    if (!user_id) {
+      return c.json({
+        status: 'error',
+        message: 'Missing user_id parameter'
+      }, 400);
+    }
+
+    // Build where conditions
+    let conditions = [
+      eq(accounts.user_id, user_id)
+    ];
+
+    // Add network condition if provided
+    if (network) {
+      conditions.push(eq(accounts.network, network));
+    }
+
+    // Add address condition if provided
+    if (address) {
+      conditions.push(eq(accounts.address, address));
+    }
+
+    // Delete account(s) matching conditions
+    await db.delete(accounts)
+      .where(and(...conditions));
+
+    return c.json({
+      status: 'success',
+      message: 'Account(s) deleted successfully'
+    });
+
+  } catch (error: any) {
+    console.error('Error deleting account:', error);
+    return c.json({
+      status: 'error',
+      message: 'Failed to delete account',
+      error: error.message
+    }, 500);
+  }
+});
+
+// Create a new token on Sui blockchain
+app.post('/api/sui/token', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { 
+      name, 
+      symbol, 
+      description, 
+      image_url, 
+      init_supply, 
+      wallet_address,
+      network 
+    } = body;
+
+    // Validate required parameters
+    if (!name || !symbol || !init_supply || !wallet_address || !network) {
+      return c.json({
+        status: 'error',
+        message: 'Missing required parameters: name, symbol, init_supply, wallet_address, and network are required'
+      }, 400);
+    }
+
+    // Validate network value
+    if (!['mainnet', 'testnet'].includes(network)) {
+      return c.json({
+        status: 'error',
+        message: 'Invalid network parameter. Must be either "mainnet" or "testnet"'
+      }, 400);
+    }
+
+    // Get the account from database
+    const account = await db.select()
+      .from(accounts)
+      .where(and(
+        eq(accounts.address, wallet_address),
+        eq(accounts.network, network)
+      ))
+      .limit(1);
+
+    if (!account || account.length === 0) {
+      return c.json({
+        status: 'error',
+        message: 'Account not found or not authorized'
+      }, 404);
+    }
+
+    // Initialize Sui client
+    const suiClient = new SuiClient({
+      url: network === "mainnet" ? 'https://fullnode.mainnet.sui.io:443' : 'https://fullnode.testnet.sui.io:443',
+    });
+
+    // Create transaction block for token creation
+    const tx = new TransactionBlock();
+
+    // Create new coin with custom parameters
+    const [treasury_cap, metadata] = tx.moveCall({
+      target: '0x2::coin::create_currency',
+      arguments: [
+        tx.pure(Buffer.from(name).toString('hex')), // Name as bytes
+        tx.pure(Buffer.from(symbol).toString('hex')), // Symbol as bytes
+        tx.pure(Buffer.from(description || '').toString('hex')), // Description as bytes
+        tx.pure(9), // Decimals
+      ],
+    });
+
+    // Mint initial supply
+    const coin = tx.moveCall({
+      target: '0x2::coin::mint',
+      arguments: [
+        treasury_cap,
+        tx.pure(BigInt(init_supply))
+      ],
+    });
+
+    // Transfer the minted coins to the creator
+    tx.transferObjects([coin], tx.pure(wallet_address));
+
+    // If image URL is provided, update the icon URL
+    if (image_url) {
+      tx.moveCall({
+        target: '0x2::coin::update_icon_url',
+        arguments: [
+          metadata,
+          tx.pure(image_url)
+        ],
+      });
+    }
+
+    // Sign and execute transaction
+    const keypair = Ed25519Keypair.fromSecretKey(
+      Uint8Array.from(Buffer.from(account[0].privateKey, 'base64').slice(0, 32))
+    );
+    
+    const result = await suiClient.signAndExecuteTransactionBlock({
+      signer: keypair,
+      transactionBlock: tx,
+      options: {
+        showEffects: true,
+        showEvents: true,
+        showObjectChanges: true,
+      },
+    });
+
+    return c.json({
+      status: 'success',
+      data: {
+        transaction: result,
+        token: {
+          name,
+          symbol,
+          description,
+          image_url,
+          init_supply: Number(init_supply),
+          decimals: 9,
+          creator: wallet_address,
+          network
+        }
+      }
+    });
+
+  } catch (error: any) {
+    console.error('Error creating token:', error);
+    return c.json({
+      status: 'error',
+      message: 'Failed to create token',
+      error: error.message
+    }, 500);
+  }
+});
+
+// Import account using private key or mnemonic
+app.post('/api/sui/account/import', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { 
+      private_key, 
+      mnemonic, 
+      user_id, 
+      network, 
+      scheme = 'ed25519' 
+    } = body;
+
+    // Validate required parameters
+    if (!user_id) {
+      return c.json({
+        status: 'error',
+        message: 'Missing user_id parameter'
+      }, 400);
+    }
+
+    if (!network) {
+      return c.json({
+        status: 'error',
+        message: 'Missing network parameter'
+      }, 400);
+    }
+
+    // Validate network value
+    if (!['mainnet', 'testnet'].includes(network)) {
+      return c.json({
+        status: 'error',
+        message: 'Invalid network parameter. Must be either "mainnet" or "testnet"'
+      }, 400);
+    }
+
+    // Check if at least one of private_key or mnemonic is provided
+    if (!private_key && !mnemonic) {
+      return c.json({
+        status: 'error',
+        message: 'Either private_key or mnemonic must be provided'
+      }, 400);
+    }
+
+    let keypair;
+
+    if (private_key) {
+      // Import from private key
+      try {
+        if (scheme.toLowerCase() === 'ed25519') {
+          keypair = Ed25519Keypair.fromSecretKey(
+            Uint8Array.from(Buffer.from(private_key, 'base64').slice(0, 32))
+          );
+        } else if (scheme.toLowerCase() === 'secp256k1') {
+          keypair = Secp256k1Keypair.fromSecretKey(
+            Uint8Array.from(Buffer.from(private_key, 'base64'))
+          );
+        } else {
+          throw new Error('Unsupported scheme');
+        }
+      } catch (error) {
+        return c.json({
+          status: 'error',
+          message: 'Invalid private key format'
+        }, 400);
+      }
+    } else if (mnemonic) {
+      // Validate mnemonic (12 words)
+      const words = mnemonic.trim().split(' ');
+      if (words.length !== 12) {
+        return c.json({
+          status: 'error',
+          message: 'Mnemonic must be exactly 12 words'
+        }, 400);
+      }
+
+      // Import from mnemonic
+      try {
+        if (scheme.toLowerCase() === 'ed25519') {
+          keypair = Ed25519Keypair.deriveKeypair(mnemonic);
+        } else if (scheme.toLowerCase() === 'secp256k1') {
+          keypair = Secp256k1Keypair.deriveKeypair(mnemonic);
+        } else {
+          throw new Error('Unsupported scheme');
+        }
+      } catch (error) {
+        return c.json({
+          status: 'error',
+          message: 'Invalid mnemonic phrase'
+        }, 400);
+      }
+    }
+
+    // Ensure keypair was created
+    if (!keypair) {
+      return c.json({
+        status: 'error',
+        message: 'Failed to create keypair'
+      }, 500);
+    }
+
+    const address = keypair.getPublicKey().toSuiAddress();
+    const publicKey = keypair.getPublicKey().toBase64();
+    const privateKey = keypair.export().privateKey;
+
+    // Check if account already exists
+    const existingAccount = await db.select()
+      .from(accounts)
+      .where(and(
+        eq(accounts.address, address),
+        eq(accounts.network, network)
+      ))
+      .limit(1);
+
+    if (existingAccount && existingAccount.length > 0) {
+      return c.json({
+        status: 'error',
+        message: 'Account already exists for this network'
+      }, 400);
+    }
+
+    // Save to database
+    await db.insert(accounts).values({
+      address,
+      publicKey,
+      privateKey,
+      scheme,
+      user_id,
+      network
+    });
+
+    return c.json({
+      status: 'success',
+      data: {
+        address,
+        publicKey,
+        scheme,
+        network
+      }
+    });
+
+  } catch (error: any) {
+    console.error('Error importing account:', error);
+    return c.json({
+      status: 'error',
+      message: 'Failed to import account',
+      error: error.message
+    }, 500);
+  }
+});
+
+// Start the server
+const port = parseInt(process.env.PORT || '7777', 10);
 console.log(`Server is running on port ${port}`);
 
 export default {
-    port,
-    fetch: app.fetch,
+  port,
+  fetch: app.fetch,
 };
