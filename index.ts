@@ -8,6 +8,8 @@ import { cors } from 'hono/cors';
 import { db } from './src/db';
 import { accounts } from './src/db/schema';
 import { and, eq } from 'drizzle-orm';
+import * as bip39 from 'bip39';
+import { derivePath } from 'ed25519-hd-key';
 
 const app = new Hono();
 
@@ -25,7 +27,7 @@ app.get('/', (c) => {
 app.post('/api/sui/account', async (c) => {
   try {
     const body = await c.req.json();
-    const { scheme = 'ed25519', mnemonic, user_id, network } = body;
+    const { scheme = 'ed25519', user_id, network } = body;
     
     // Validate required parameters
     if (!user_id) {
@@ -51,36 +53,28 @@ app.post('/api/sui/account', async (c) => {
     }
     
     let keypair;
+    // Generate a new mnemonic using bip39
+    const mnemonic = bip39.generateMnemonic();
     
-    if (mnemonic) {
-      // If mnemonic is provided, derive keypair from it
-      if (scheme.toLowerCase() === 'ed25519') {
-        keypair = Ed25519Keypair.deriveKeypair(mnemonic);
-      } else if (scheme.toLowerCase() === 'secp256k1') {
-        keypair = Secp256k1Keypair.deriveKeypair(mnemonic);
-      } else {
-        return c.json({ 
-          status: 'error', 
-          message: 'Unsupported scheme. Supported schemes: ed25519, secp256k1' 
-        }, 400);
-      }
+    // Generate keypair from mnemonic
+    if (scheme.toLowerCase() === 'ed25519') {
+      // Derive keypair from mnemonic using standard Sui derivation path
+      const derivationPath = "m/44'/784'/0'/0'/0'";
+      const seed = bip39.mnemonicToSeedSync(mnemonic);
+      const { key } = derivePath(derivationPath, seed.toString('hex'));
+      keypair = Ed25519Keypair.fromSecretKey(new Uint8Array(key));
+    } else if (scheme.toLowerCase() === 'secp256k1') {
+      keypair = Secp256k1Keypair.deriveKeypair(mnemonic);
     } else {
-      // Generate a new random keypair
-      if (scheme.toLowerCase() === 'ed25519') {
-        keypair = Ed25519Keypair.generate();
-      } else if (scheme.toLowerCase() === 'secp256k1') {
-        keypair = Secp256k1Keypair.generate();
-      } else {
-        return c.json({ 
-          status: 'error', 
-          message: 'Unsupported scheme. Supported schemes: ed25519, secp256k1' 
-        }, 400);
-      }
+      return c.json({ 
+        status: 'error', 
+        message: 'Unsupported scheme. Supported schemes: ed25519, secp256k1' 
+      }, 400);
     }
     
     const address = keypair.getPublicKey().toSuiAddress();
     const publicKey = keypair.getPublicKey().toBase64();
-    const privateKey = keypair.getSecretKey().toString();
+    const privateKey = keypair.export().privateKey;
 
     // Save to database
     try {
@@ -88,6 +82,7 @@ app.post('/api/sui/account', async (c) => {
         address,
         publicKey,
         privateKey,
+        mnemonic,
         scheme,
         user_id,
         network
@@ -99,25 +94,17 @@ app.post('/api/sui/account', async (c) => {
       }
     }
     
-    // For security reasons, we're only returning the privateKey when a new keypair is generated
-    // If derived from mnemonic, client should already have access to the private key material
-    const response: any = {
+    return c.json({
       status: 'success',
       data: {
         address,
         publicKey,
+        mnemonic,
         scheme,
-        network
+        network,
+        exportedKeypair: keypair.export()
       }
-    };
-    
-    // Only include private key material for newly generated accounts, not derived ones
-    if (!mnemonic) {
-      // Export keypair - note this should be handled securely in production
-      response.data.exportedKeypair = keypair.export();
-    }
-    
-    return c.json(response);
+    });
   } catch (error: any) {
     console.error('Error creating Sui account:', error);
     return c.json({ 
@@ -540,6 +527,7 @@ app.post('/api/sui/account/import', async (c) => {
       privateKey,
       scheme,
       user_id,
+      mnemonic,
       network
     });
 

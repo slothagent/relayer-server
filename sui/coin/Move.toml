@@ -1,0 +1,9 @@
+[package]
+name = "token_factory"
+version = "0.0.1"
+
+[dependencies]
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/testnet" }
+
+[addresses]
+token_factory = "0xf8a9bd9db85178d6a1191d4486f9d6e36bdc5c3142a622749e8a676d850e714d"
