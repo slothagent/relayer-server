@@ -7,3 +7,8 @@ Sloth Implementation deployed to: 0x0fb294BB46829a2C3fc460cdbfa09381d1417494
 
 
 Sui: 0xeb766418d230c21a0b8851a42e68b9994ce414a2406aa68d32d4912ec1372f41
+
+
+sui keytool import "piece chimney rally can exist stick perfect assume various about elbow orphan" ed25519
+
+sui client switch --address 0xf8a9bd9db85178d6a1191d4486f9d6e36bdc5c3142a622749e8a676d850e714d

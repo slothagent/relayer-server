@@ -2,14 +2,16 @@ import { Hono } from 'hono';
 import { Ed25519Keypair } from '@mysten/sui.js/keypairs/ed25519';
 import { Secp256k1Keypair } from '@mysten/sui.js/keypairs/secp256k1';
 import { SuiClient } from '@mysten/sui.js/client';
-import { bcs } from '@mysten/sui.js/bcs';
-import { TransactionBlock } from '@mysten/sui.js/transactions';
 import { cors } from 'hono/cors';
 import { db } from './src/db';
 import { accounts } from './src/db/schema';
 import { and, eq } from 'drizzle-orm';
 import * as bip39 from 'bip39';
 import { derivePath } from 'ed25519-hd-key';
+import path from 'path';
+import fs from 'fs';
+import { execSync } from 'child_process';
+import { transferTokens } from 'lib/sui';
 
 const app = new Hono();
 
@@ -280,15 +282,19 @@ app.post('/api/sui/token', async (c) => {
       description, 
       image_url, 
       init_supply, 
-      wallet_address,
-      network 
+      network,
+      twitter,
+      telegram,
+      website,
+      uri,
+      user_id
     } = body;
 
     // Validate required parameters
-    if (!name || !symbol || !init_supply || !wallet_address || !network) {
+    if (!name || !symbol || !init_supply || !network) {
       return c.json({
         status: 'error',
-        message: 'Missing required parameters: name, symbol, init_supply, wallet_address, and network are required'
+        message: 'Missing required parameters: name, symbol, init_supply, and network are required'
       }, 400);
     }
 
@@ -304,8 +310,8 @@ app.post('/api/sui/token', async (c) => {
     const account = await db.select()
       .from(accounts)
       .where(and(
-        eq(accounts.address, wallet_address),
-        eq(accounts.network, network)
+        eq(accounts.network, network),
+        eq(accounts.user_id, user_id)
       ))
       .limit(1);
 
@@ -316,82 +322,110 @@ app.post('/api/sui/token', async (c) => {
       }, 404);
     }
 
-    // Initialize Sui client
-    const suiClient = new SuiClient({
-      url: network === "mainnet" ? 'https://fullnode.mainnet.sui.io:443' : 'https://fullnode.testnet.sui.io:443',
-    });
+    // Create token configuration
+    const tokenConfig = {
+      name,
+      symbol,
+      decimals: 9,
+      initialSupply: init_supply,
+      description: description || '',
+      url: website || '',
+      twitter: twitter || '',
+      telegram: telegram || '',
+      website: website || '',
+      uri: uri || image_url || ''
+    };
 
-    // Create transaction block for token creation
-    const tx = new TransactionBlock();
+    // Update token.move with new configuration
+    const tokenMovePath = path.join(__dirname, 'sources/token.move');
+    const tokenMoveContent = `module 0x0::${name} {
+    struct ${name.toUpperCase()} has drop {}
+    
+    fun init(witness: ${name.toUpperCase()}, ctx: &mut 0x2::tx_context::TxContext) {
+        let (treasury_cap, metadata) = 0x2::coin::create_currency<${name.toUpperCase()}>(
+            witness,
+            ${tokenConfig.decimals},
+            b"${symbol}",
+            b"${name}",
+            b"${description}",
+            0x1::option::some<0x2::url::Url>(0x2::url::new_unsafe_from_bytes(b"${uri || image_url}")),
+            ctx
+        );
+        
+        0x2::transfer::public_freeze_object<0x2::coin::CoinMetadata<${name.toUpperCase()}>>(metadata);
+        0x2::transfer::public_transfer<0x2::coin::Coin<${name.toUpperCase()}>>(
+            0x2::coin::mint<${name.toUpperCase()}>(&mut treasury_cap, ${init_supply}, ctx),
+            0x2::tx_context::sender(ctx)
+        );
+        0x2::transfer::public_freeze_object<0x2::coin::TreasuryCap<${name.toUpperCase()}>>(treasury_cap);
+    }
+}`;
 
-    // Create new coin with custom parameters
-    const [treasury_cap, metadata] = tx.moveCall({
-      target: '0x2::coin::create_currency',
-      arguments: [
-        tx.pure(Buffer.from(name).toString('hex')), // Name as bytes
-        tx.pure(Buffer.from(symbol).toString('hex')), // Symbol as bytes
-        tx.pure(Buffer.from(description || '').toString('hex')), // Description as bytes
-        tx.pure(9), // Decimals
-      ],
-    });
+    // Write updated content to token.move
+    fs.writeFileSync(tokenMovePath, tokenMoveContent);
 
-    // Mint initial supply
-    const coin = tx.moveCall({
-      target: '0x2::coin::mint',
-      arguments: [
-        treasury_cap,
-        tx.pure(BigInt(init_supply))
-      ],
-    });
+    // Execute deploy script
+    const deployScriptPath = path.join(__dirname, 'scripts/deploy.sh');
+    const deployOutput = execSync(`sh ${deployScriptPath}`, { encoding: 'utf-8' });
 
-    // Transfer the minted coins to the creator
-    tx.transferObjects([coin], tx.pure(wallet_address));
+    // Extract PackageID from output
+    const packageIdMatch = deployOutput.match(/PACKAGE_ID:(.*)/);
+    const packageId = packageIdMatch ? packageIdMatch[1].trim() : '';
 
-    // If image URL is provided, update the icon URL
-    if (image_url) {
-      tx.moveCall({
-        target: '0x2::coin::update_icon_url',
-        arguments: [
-          metadata,
-          tx.pure(image_url)
-        ],
-      });
+    // Validate package ID
+    if (!packageId) {
+      return c.json({
+        status: 'error',
+        message: 'Failed to deploy token: No package ID received from deployment'
+      }, 500);
     }
 
-    // Sign and execute transaction
-    const keypair = Ed25519Keypair.fromSecretKey(
-      Uint8Array.from(Buffer.from(account[0].privateKey, 'base64').slice(0, 32))
+    // Construct coin type
+    const coinType = `${packageId}::${name}::${name.toUpperCase()}`;
+
+    // Validate coin type
+    if (coinType === `::${name}::${name.toUpperCase()}`) {
+      return c.json({
+        status: 'error',
+        message: 'Failed to deploy token: Invalid coin type generated'
+      }, 500);
+    }
+
+    // Transfer tokens to the account
+    await transferTokens(
+      coinType,
+      account[0].address
     );
-    
-    const result = await suiClient.signAndExecuteTransactionBlock({
-      signer: keypair,
-      transactionBlock: tx,
-      options: {
-        showEffects: true,
-        showEvents: true,
-        showObjectChanges: true,
-      },
-    });
 
     return c.json({
       status: 'success',
       data: {
-        transaction: result,
-        token: {
-          name,
-          symbol,
-          description,
-          image_url,
-          init_supply: Number(init_supply),
-          decimals: 9,
-          creator: wallet_address,
-          network
-        }
+        name,
+        symbol,
+        description,
+        image_url: uri || image_url,
+        init_supply: Number(init_supply),
+        decimals: 9,
+        network,
+        packageId,
+        coinType,
+        twitter,
+        telegram,
+        website,
+        explorerCoinType: `https://suiscan.xyz/${network.toLowerCase()}/coin/${coinType}/txs`
       }
     });
 
   } catch (error: any) {
     console.error('Error creating token:', error);
+    // Check if error is from deployment script
+    if (error.message && error.message.includes('deploy.sh')) {
+      return c.json({
+        status: 'error',
+        message: 'Failed to deploy token: Deployment script execution failed',
+        error: error.message
+      }, 500);
+    }
     return c.json({
       status: 'error',
       message: 'Failed to create token',
