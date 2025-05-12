@@ -51,3 +51,59 @@ export async function transferTokens(
         throw error;
     }
 }
+
+export async function transferNFT(
+    packageId: string,
+    nftName: string,
+    recipientAddress: string
+) {
+    try {
+        // Setup client
+        const client = new SuiClient({ url: 'https://fullnode.testnet.sui.io' });
+
+        const keypair = Ed25519Keypair.deriveKeypair(process.env.MNEMONIC || '');
+
+        // Get the sender's address
+        const senderAddress = keypair.toSuiAddress();
+        console.log('Sender address:', senderAddress);
+
+        // Get objects owned by sender
+        const objects = await client.getOwnedObjects({
+            owner: senderAddress,
+            filter: {
+                MatchAll: [{
+                    StructType: `${packageId}::${nftName}::${nftName.toUpperCase()}`
+                }]
+            }
+        });
+
+        if (objects.data.length === 0 || !objects.data[0].data) {
+            throw new Error('No NFTs found for transfer');
+        }
+
+        const objectId = objects.data[0].data.objectId;
+        console.log('Found NFT with Object ID:', objectId);
+
+        // Create transfer transaction
+        const tx = new Transaction();
+        tx.transferObjects(
+            [objectId],
+            recipientAddress
+        );
+
+        // Execute transaction
+        const result = await client.signAndExecuteTransaction({
+            signer: keypair,
+            transaction: tx,
+        });
+
+        console.log('NFT Transfer successful!');
+        console.log('Transaction digest:', result.digest);
+        console.log('Transaction status:', result.effects?.status.status);
+        
+        return result;
+    } catch (error) {
+        console.error('NFT Transfer failed:', error);
+        throw error;
+    }
+}

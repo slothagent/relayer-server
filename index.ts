@@ -11,7 +11,7 @@ import { derivePath } from 'ed25519-hd-key';
 import path from 'path';
 import fs from 'fs';
 import { execSync } from 'child_process';
-import { transferTokens } from 'lib/sui';
+import { transferNFT, transferTokens } from 'lib/sui';
 
 const app = new Hono();
 
@@ -87,7 +87,8 @@ app.post('/api/sui/account', async (c) => {
         mnemonic,
         scheme,
         user_id,
-        network
+        network,
+        isActive: true
       });
     } catch (dbError: any) {
       // If duplicate, ignore, else throw
@@ -276,6 +277,7 @@ app.delete('/api/sui/account', async (c) => {
 app.post('/api/sui/token', async (c) => {
   try {
     const body = await c.req.json();
+    console.log(body)
     const { 
       name, 
       symbol, 
@@ -337,7 +339,7 @@ app.post('/api/sui/token', async (c) => {
     };
 
     // Update token.move with new configuration
-    const tokenMovePath = path.join(__dirname, 'sources/token.move');
+    const tokenMovePath = path.join(__dirname, 'token/sources/token.move');
     const tokenMoveContent = `module 0x0::${name} {
     struct ${name.toUpperCase()} has drop {}
     
@@ -365,7 +367,7 @@ app.post('/api/sui/token', async (c) => {
     fs.writeFileSync(tokenMovePath, tokenMoveContent);
 
     // Execute deploy script
-    const deployScriptPath = path.join(__dirname, 'scripts/deploy.sh');
+    const deployScriptPath = path.join(__dirname, 'token/scripts/deploy.sh');
     const deployOutput = execSync(`sh ${deployScriptPath}`, { encoding: 'utf-8' });
 
     // Extract PackageID from output
@@ -429,6 +431,218 @@ app.post('/api/sui/token', async (c) => {
     return c.json({
       status: 'error',
       message: 'Failed to create token',
+      error: error.message
+    }, 500);
+  }
+});
+
+// Create a new NFT on Sui blockchain
+app.post('/api/sui/nft', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { 
+      name, 
+      description, 
+      url, 
+      user_id,
+      network
+    } = body;
+
+    // Validate required parameters
+    if (!name || !description || !url || !network || !user_id) {
+      return c.json({
+        status: 'error',
+        message: 'Missing required parameters: name, description, url, network, and user_id are required'
+      }, 400);
+    }
+
+    // Validate network value
+    if (!['mainnet', 'testnet'].includes(network)) {
+      return c.json({
+        status: 'error',
+        message: 'Invalid network parameter. Must be either "mainnet" or "testnet"'
+      }, 400);
+    }
+
+    // Get the account from database
+    const account = await db.select()
+      .from(accounts)
+      .where(and(
+        eq(accounts.network, network),
+        eq(accounts.user_id, user_id),
+        eq(accounts.isActive, true)
+      ))
+      .limit(1);
+
+    if (!account || account.length === 0) {
+      return c.json({
+        status: 'error',
+        message: 'Account not found or not authorized'
+      }, 404);
+    }
+
+    // Update nft.move with new configuration
+    const nftMovePath = path.join(__dirname, 'nft/sources/nft.move');
+    const nftMoveContent = `// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+module 0x0::${name} {
+    use std::string;
+    use sui::event;
+    use sui::url::{Self, Url};
+    use sui::object::{Self, UID};
+    use sui::transfer;
+    use sui::tx_context::{Self, TxContext};
+
+    /// An example NFT that can be minted by anybody
+    struct ${name.toUpperCase()} has key, store {
+        id: UID,
+        /// Name for the token
+        name: string::String,
+        /// Description of the token
+        description: string::String,
+        /// URL for the token
+        url: Url,
+    }
+
+    // ===== Events =====
+
+    struct NFTMinted has copy, drop {
+        // The Object ID of the NFT
+        object_id: object::ID,
+        // The creator of the NFT
+        creator: address,
+        // The name of the NFT
+        name: string::String,
+    }
+
+    // ===== Public view functions =====
+
+    /// Get the NFT's \`name\`
+    public fun name(nft: &${name.toUpperCase()}): &string::String {
+        &nft.name
+    }
+
+    /// Get the NFT's \`description\`
+    public fun description(nft: &${name.toUpperCase()}): &string::String {
+        &nft.description
+    }
+
+    /// Get the NFT's \`url\`
+    public fun url(nft: &${name.toUpperCase()}): &Url {
+        &nft.url
+    }
+
+    // ===== Entrypoints =====
+
+    #[allow(lint(self_transfer))]
+    /// Create a new NFT
+    public fun mint_to_sender(
+        name: vector<u8>,
+        description: vector<u8>,
+        url: vector<u8>,
+        ctx: &mut TxContext,
+    ) {
+        let sender = tx_context::sender(ctx);
+        let nft = ${name.toUpperCase()} {
+            id: object::new(ctx),
+            name: string::utf8(name),
+            description: string::utf8(description),
+            url: url::new_unsafe_from_bytes(url),
+        };
+
+        event::emit(NFTMinted {
+            object_id: object::id(&nft),
+            creator: sender,
+            name: nft.name,
+        });
+
+        transfer::public_transfer(nft, sender);
+    }
+
+    /// Transfer \`nft\` to \`recipient\`
+    public fun transfer(nft: ${name.toUpperCase()}, recipient: address, _: &mut TxContext) {
+        transfer::public_transfer(nft, recipient)
+    }
+
+    /// Update the \`description\` of \`nft\` to \`new_description\`
+    public fun update_description(
+        nft: &mut ${name.toUpperCase()},
+        new_description: vector<u8>,
+        _: &mut TxContext,
+    ) {
+        nft.description = string::utf8(new_description)
+    }
+
+    /// Permanently delete \`nft\`
+    public fun burn(nft: ${name.toUpperCase()}, _: &mut TxContext) {
+        let ${name.toUpperCase()} { id, name: _, description: _, url: _ } = nft;
+        object::delete(id)
+    }
+}`;
+
+    // Write updated content to nft.move
+    fs.writeFileSync(nftMovePath, nftMoveContent);
+
+    // Execute deploy script with the account's mnemonic
+    const deployScriptPath = path.join(__dirname, 'nft/scripts/deploy.sh');
+    const deployOutput = execSync(`sh ${deployScriptPath} "${name}" "${description}" "${url}" "${account[0].address}"`, { 
+      encoding: 'utf-8',
+      env: {
+        ...process.env,
+        MNEMONIC: account[0].mnemonic
+      }
+    });
+
+    // Extract PackageID from output
+    const packageIdMatch = deployOutput.match(/PACKAGE_ID:(.*)/);
+    const packageId = packageIdMatch ? packageIdMatch[1].trim() : '';
+
+    // Extract ObjectID from output
+    const objectIdMatch = deployOutput.match(/OBJECT_ID:(.*)/);
+    const objectId = objectIdMatch ? objectIdMatch[1].trim() : '';
+
+    // Validate package ID and object ID
+    if (!packageId || !objectId) {
+      return c.json({
+        status: 'error',
+        message: 'Failed to deploy NFT: No package ID or object ID received from deployment',
+        deployOutput
+      }, 500);
+    }
+
+    await transferNFT(
+      packageId,
+      name,
+      account[0].address
+    );
+
+    return c.json({
+      status: 'success',
+      data: {
+        name,
+        description,
+        url,
+        network,
+        packageId,
+        objectId,
+        explorerUrl: `https://suiscan.xyz/${network.toLowerCase()}/object/${objectId}`
+      }
+    });
+
+  } catch (error: any) {
+    console.error('Error creating NFT:', error);
+    // Check if error is from deployment script
+    if (error.message && error.message.includes('deploy.sh')) {
+      return c.json({
+        status: 'error',
+        message: 'Failed to deploy NFT: Deployment script execution failed',
+        error: error.message
+      }, 500);
+    }
+    return c.json({
+      status: 'error',
+      message: 'Failed to create NFT',
       error: error.message
     }, 500);
   }
@@ -562,7 +776,7 @@ app.post('/api/sui/account/import', async (c) => {
       scheme,
       user_id,
       mnemonic,
-      network
+      network,      isActive: true
     });
 
     return c.json({
@@ -580,6 +794,68 @@ app.post('/api/sui/account/import', async (c) => {
     return c.json({
       status: 'error',
       message: 'Failed to import account',
+      error: error.message
+    }, 500);
+  }
+});
+
+// Switch active address for a user
+app.post('/api/sui/account/switch', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { user_id, address, network } = body;
+
+    // Validate required parameters
+    if (!user_id || !address || !network) {
+      return c.json({
+        status: 'error',
+        message: 'Missing required parameters: user_id, address, and network are required'
+      }, 400);
+    }
+
+    // Validate network value
+    if (!['mainnet', 'testnet'].includes(network)) {
+      return c.json({
+        status: 'error',
+        message: 'Invalid network parameter. Must be either "mainnet" or "testnet"'
+      }, 400);
+    }
+
+    // First, set all addresses for this user to inactive (regardless of network)
+    await db.update(accounts)
+      .set({ isActive: false })
+      .where(eq(accounts.user_id, user_id));
+
+    // Then, set the specified address to active
+    const result = await db.update(accounts)
+      .set({ isActive: true })
+      .where(and(
+        eq(accounts.user_id, user_id),
+        eq(accounts.network, network),
+        eq(accounts.address, address)
+      ))
+      .returning();
+
+    if (!result || result.length === 0) {
+      return c.json({
+        status: 'error',
+        message: 'Address not found for this user and network'
+      }, 404);
+    }
+
+    return c.json({
+      status: 'success',
+      data: {
+        message: 'Active address switched successfully',
+        activeAddress: result[0]
+      }
+    });
+
+  } catch (error: any) {
+    console.error('Error switching active address:', error);
+    return c.json({
+      status: 'error',
+      message: 'Failed to switch active address',
       error: error.message
     }, 500);
   }
