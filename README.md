@@ -1,158 +1,172 @@
-# Sloth Relayer API Documentation
+# Sui Relayer Server
 
 ## Overview
-The Sloth Relayer API is a service that handles gasless transactions for the Sloth protocol. It supports token creation, buying, and selling operations through meta-transactions.
+The Sui Relayer Server is a comprehensive API service that provides functionality for managing Sui blockchain accounts, creating tokens, and minting NFTs. It supports both mainnet and testnet operations.
 
 ## Base URL
 ```
-http://localhost:4040
+http://localhost:7777
 ```
 
-## Endpoints
+## API Endpoints
 
-### POST /relay
-This endpoint handles all relayer operations through a unified interface. The operation type is determined by the `type` field in the request body.
+### Account Management
 
-## Supported Operations
+#### Create Account
+`POST /api/sui/account`
 
-### 1. Create Token
-Creates a new token through the Sloth Factory contract.
-
-**Type**: `create-token`
+Creates a new Sui account with specified scheme.
 
 **Request Body**:
 ```json
 {
-    "type": "create-token",
-    "creator": "string (address)",
-    "params": {
-        "name": "string",
-        "symbol": "string",
-        "tokenId": "string",
-        "initialDeposit": "string",
-        "twitter": "string",
-        "telegram": "string",
-        "website": "string",
-        "categories": "string[]",
-        "image": "string",
+    "scheme": "ed25519" | "secp256k1",
+    "user_id": "string",
+    "network": "mainnet" | "testnet"
+}
+```
+
+**Response**:
+```json
+{
+    "status": "success",
+    "data": {
+        "address": "string",
+        "publicKey": "string",
+        "mnemonic": "string",
+        "scheme": "string",
         "network": "string",
-        "description": "string"
-    },
-    "deadline": "string",
-    "nonce": "string",
-    "signature": {
-        "v": "number",
-        "r": "string",
-        "s": "string"
+        "exportedKeypair": "object"
     }
 }
 ```
 
-**Response**:
-```json
-{
-    "success": true,
-    "txHash": "string",
-    "token": "string (address)",
-    "sloth": "string (address)",
-    "creator": "string (address)",
-    "totalSupply": "string",
-    "saleAmount": "string",
-    "tokenOffset": "string",
-    "nativeOffset": "string",
-    "tokenId": "string",
-    "whitelistEnabled": "boolean",
-    "factory": "string (address)",
-    "blockNumber": "number"
-}
-```
+#### Get Account by User ID
+`GET /api/sui/account/by-user`
 
-### 2. Buy Tokens
-Executes a token purchase through a Sloth contract.
+Retrieves account(s) associated with a user ID.
 
-**Type**: `buy`
+**Query Parameters**:
+- `user_id` (required): User identifier
+- `privatekey` (optional): Private key for filtering
+- `network` (optional): Network to filter by
+
+#### Get Account Details
+`GET /api/sui/account/:address`
+
+Retrieves detailed account information including balances and NFTs.
+
+**Query Parameters**:
+- `network`: "mainnet" | "testnet"
+
+#### Import Account
+`POST /api/sui/account/import`
+
+Imports an existing account using private key or mnemonic.
 
 **Request Body**:
 ```json
 {
-    "type": "buy",
-    "slothContractAddress": "string (address)",
-    "buyer": "string (address)",
-    "recipient": "string (address)",
-    "nativeAmount": "string",
-    "nonce": "string",
-    "deadline": "string",
-    "signature": {
-        "v": "number",
-        "r": "string",
-        "s": "string"
-    }
+    "private_key": "string",
+    "mnemonic": "string",
+    "user_id": "string",
+    "network": "mainnet" | "testnet",
+    "scheme": "ed25519" | "secp256k1"
 }
 ```
 
-**Response**:
-```json
-{
-    "success": true,
-    "txHash": "string"
-}
-```
+#### Switch Active Address
+`POST /api/sui/account/switch`
 
-### 3. Sell Tokens
-Executes a token sale through a Sloth contract.
-
-**Type**: `sell`
+Changes the active address for a user.
 
 **Request Body**:
 ```json
 {
-    "type": "sell",
-    "slothContractAddress": "string (address)",
-    "seller": "string (address)",
-    "recipient": "string (address)",
-    "tokenAmount": "string",
-    "nonce": "string",
-    "deadline": "string",
-    "signature": {
-        "v": "number",
-        "r": "string",
-        "s": "string"
-    }
+    "user_id": "string",
+    "address": "string",
+    "network": "mainnet" | "testnet"
 }
 ```
 
-**Response**:
+### Token Management
+
+#### Create Token
+`POST /api/sui/token`
+
+Creates a new token on the Sui blockchain.
+
+**Request Body**:
 ```json
 {
-    "success": true,
-    "txHash": "string"
+    "name": "string",
+    "symbol": "string",
+    "description": "string",
+    "image_url": "string",
+    "init_supply": "number",
+    "network": "mainnet" | "testnet",
+    "twitter": "string",
+    "telegram": "string",
+    "website": "string",
+    "uri": "string",
+    "user_id": "string"
+}
+```
+
+### NFT Management
+
+#### Create NFT
+`POST /api/sui/nft`
+
+Creates a new NFT on the Sui blockchain.
+
+**Request Body**:
+```json
+{
+    "name": "string",
+    "description": "string",
+    "url": "string",
+    "user_id": "string",
+    "network": "mainnet" | "testnet"
 }
 ```
 
 ## Error Handling
-In case of errors, the API will return a 400 status code with an error message:
+The API returns standardized error responses:
 
 ```json
 {
-    "success": false,
-    "error": "Error message description"
+    "status": "error",
+    "message": "Error description",
+    "error": "Detailed error message"
 }
 ```
 
 ## Configuration
-The relayer service requires the following environment variables:
+The server requires the following environment variables:
 
-- `RPC_URL_ANCIENT8`: RPC URL for the Ancient8 network
-- `RELAYER_PRIVATE_KEY`: Private key for the relayer account
-- `API_URL`: Base URL for the API service
+- `PORT`: Server port (default: 7777)
 
-## CORS Configuration
-The API supports CORS for the following origins:
-- https://www.slothai.xyz
-- http://localhost:5173
-- https://api.slothai.xyz
-- https://slothai.xyz
+## CORS
+The API supports CORS for cross-origin requests.
 
-## Contract Addresses
-- Sloth Factory: `0xe520B9F320Ed91Cf590CF9884d2b051f2ece4C4E`
-- Native Token: `0xfC57492d6569f6F45Ea1b8850e842Bf5F9656EA6`
+## Security
+- All sensitive operations require proper authentication
+- Private keys and mnemonics are stored securely
+- Network validation for all operations
+- Input validation for all endpoints
+
+## Development
+To run the server locally:
+
+1. Install dependencies:
+```bash
+npm install
+```
+
+2. Start the server:
+```bash
+npm start
+```
+
+The server will start on port 7777 by default.
